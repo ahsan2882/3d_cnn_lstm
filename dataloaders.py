@@ -8,7 +8,6 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms  # type: ignore
 from tqdm import tqdm
-from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, PackedSequence
 
 
 class VideoTransform:
@@ -29,18 +28,22 @@ class VideoTransform:
 
 
 class CustomVideoDataset(Dataset[Tuple[torch.Tensor, int]]):
-
-    def __init__(self, video_dir: str,  # type: ignore
-                 transform: Optional[VideoTransform] = None):
+    def __init__(self, video_dir: str, transform: Optional[VideoTransform] = None,  # type: ignore
+                 window_size: int = 128, stride: int = 32):
         """
-        Custom dataset to handle video data.
+        Custom dataset to handle video windows.
 
         Args:
             video_dir (str): Path to the dataset directory with class folders.
             transform (VideoTransform, optional): Transformations to be applied. Defaults to None.
+            window_size (int, optional): Number of frames per window. Defaults to 128.
+            stride (int, optional): Step size for sliding window. Defaults to 32.
+            mode (str, optional): Mode of dataset (train/validate/test). Defaults to "train".
         """
         self.video_dir: str = video_dir
-        self.transform: Optional[VideoTransform] = transform
+        self.transform: VideoTransform | None = transform
+        self.window_size: int = window_size
+        self.stride: int = stride
         self.video_paths, self.labels, self.classes = self._prepare_dataset()
 
     def _prepare_dataset(self) -> Tuple[List[str], List[int], List[str]]:
@@ -58,8 +61,7 @@ class CustomVideoDataset(Dataset[Tuple[torch.Tensor, int]]):
                     labels.append(label)
         return video_paths, labels, classes
 
-    def _get_video_frames(self, video_path: str) -> List[np.ndarray[Any,
-                                                                    np.dtype[np.integer[Any] | np.floating[Any]]]]:
+    def _get_video_frames(self, video_path: str):
         """Extract frames from a video file."""
         cap = cv2.VideoCapture(video_path)
         frames: List[np.ndarray[Any,
@@ -73,6 +75,19 @@ class CustomVideoDataset(Dataset[Tuple[torch.Tensor, int]]):
         cap.release()
         return frames
 
+    def _extract_windows(self,
+                         frames: List[np.ndarray[Any,
+                                                 np.dtype[np.integer[Any] | np.floating[Any]]]]
+                         ) -> List[List[np.ndarray[Any,
+                                                   np.dtype[np.integer[Any] | np.floating[Any]]]]]:
+        """Extract sliding windows from video frames."""
+        windows: List[List[np.ndarray[Any,
+                                      np.dtype[np.integer[Any] | np.floating[Any]]]]] = []
+        total_frames = len(frames)
+        for start in range(0, total_frames-self.window_size+1, self.stride):
+            windows.append(frames[start:start+self.window_size])
+        return windows
+
     def __len__(self) -> int:
         return len(self.video_paths)
 
@@ -82,18 +97,28 @@ class CustomVideoDataset(Dataset[Tuple[torch.Tensor, int]]):
         label = self.labels[idx]
         frames = self._get_video_frames(video_path)
 
-        # Convert frames to tensor and permute to (C, T, H, W)
-        video_tensor = torch.tensor(np.array(frames)).permute(
+        while len(frames) < self.window_size:
+            frames.append(np.zeros_like(frames[0]))
+        windows = self._extract_windows(frames)
+
+        # Randomly select a single window (or loop over windows if desired)
+        window_idx = np.random.randint(len(windows))
+        selected_window = windows[window_idx]
+
+        # Convert the selected window to tensor
+        window_tensor = torch.tensor(np.array(selected_window)).permute(
             3, 0, 1, 2)  # (C, T, H, W)
 
         if self.transform:
-            video_tensor = self.transform(video_tensor)
+            window_tensor = self.transform(window_tensor)
 
-        return video_tensor, label
+        return window_tensor, label
 
 
 def create_dataloaders(video_dir: str | Path,
-                       batch_size: int = 32
+                       batch_size: int = 32,
+                       window_size: int = 128,
+                       stride: int = 32
                        ) -> Tuple[
                            CustomVideoDataset, DataLoader[Tuple[torch.Tensor, int]],
                            CustomVideoDataset, DataLoader[Tuple[torch.Tensor, int]],
@@ -102,36 +127,17 @@ def create_dataloaders(video_dir: str | Path,
     # Define transformations
     video_transform = VideoTransform(size=(112, 112))
     train_dataset = CustomVideoDataset(os.path.join(
-        video_dir, 'train'), transform=video_transform)
+        video_dir, 'train'), transform=video_transform, window_size=window_size, stride=stride)
     validate_dataset = CustomVideoDataset(os.path.join(
-        video_dir, 'validate'), transform=video_transform)
+        video_dir, 'validate'), transform=video_transform, window_size=window_size, stride=stride)
     test_dataset = CustomVideoDataset(os.path.join(
-        video_dir, 'test'), transform=video_transform)
+        video_dir, 'test'), transform=video_transform, window_size=window_size, stride=stride)
 
     # Create dataloaders
     train_dataloader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True, num_workers=4, collate_fn=custom_collate_fn)
+        train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
     validate_dataloader = DataLoader(
-        validate_dataset, batch_size=batch_size, shuffle=False, num_workers=2, collate_fn=custom_collate_fn)
+        validate_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
     test_dataloader = DataLoader(
-        test_dataset, batch_size=batch_size, shuffle=False, num_workers=1, collate_fn=custom_collate_fn)
+        test_dataset, batch_size=batch_size, shuffle=False, num_workers=1)
     return train_dataset, train_dataloader, validate_dataset, validate_dataloader, test_dataset, test_dataloader, train_dataset.classes
-
-
-def custom_collate_fn(batch: List[Tuple[torch.Tensor, int]]) -> Tuple[PackedSequence, torch.Tensor]:
-    videos, labels = zip(*batch)  # Unzip the batch
-
-    # Get lengths of each video
-    lengths = torch.tensor([video.size(1) for video in videos],
-                           dtype=torch.int64)  # Convert to tensor
-
-    # Pad the video sequences (assuming they're all 5D tensors: (C, D, H, W))
-    # Shape (batch_size, max_length, channels, depth, height, width)
-    padded_videos = pad_sequence(
-        [video.permute(1, 0, 2, 3) for video in videos], batch_first=True)
-
-    # Pack the padded sequences
-    packed_videos = pack_padded_sequence(
-        padded_videos, lengths, batch_first=True, enforce_sorted=False)
-
-    return packed_videos, torch.tensor(labels)
