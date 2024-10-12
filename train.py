@@ -8,10 +8,9 @@ from torch.optim import Adam, lr_scheduler  # type: ignore
 from torchinfo import summary  # type: ignore
 
 from dataloaders import create_dataloaders
+from engine import plot_curves, train_step, val_step
 from model import ResNet3D_LSTM
 from utils import load_model, save_model
-
-from .engine import plot_curves, train_step, val_step
 
 NUM_EPOCHS = 100
 BATCH_SIZE = 8
@@ -27,15 +26,16 @@ def main(source: str, filename: str) -> None:
     """
     device: torch.device = torch.device(
         'cuda' if torch.cuda.is_available() else 'cpu')
+    # device = torch.device('cpu')
     video_dir = Path(source).resolve()
 
     _, train_dataloader, _, val_dataloader, _, _, class_names = create_dataloaders(
         video_dir, BATCH_SIZE)
     model = ResNet3D_LSTM(num_classes=len(class_names),
-                          lstm_hidden_size=512, num_layers=2).to(device)
+                          lstm_hidden_size=128, num_layers=1)
 
     model = load_model(model, Path(__file__).parent.resolve() /
-                       'model_data' / f'{filename}.pth')
+                       'model_data' / f'{filename}.pth').to(device)
     loss_fn = torch.nn.CrossEntropyLoss()
     optimizer = Adam(model.parameters(), lr=0.01)
     scheduler = lr_scheduler.ReduceLROnPlateau(
@@ -54,13 +54,14 @@ def main(source: str, filename: str) -> None:
     for epoch in range(NUM_EPOCHS):
         print(f"Epoch [{epoch + 1}/{NUM_EPOCHS}]")
         if epoch == 0:
-            summary(model, input_size=(BATCH_SIZE, 3, 128, 112, 112), col_names=[
+            summary(model, input_size=(1, 128, 3, 112, 112), col_names=[
                     "input_size", "output_size", "num_params", "params_percent", "kernel_size", "trainable"])
 
         start_time = time.time()
         train_loss, train_acc = train_step(
             model, train_dataloader, loss_fn, optimizer, device, epoch)
         train_losses.append(train_loss)
+        torch.cuda.empty_cache()
 
         # Validation phase
         val_loss, val_acc = val_step(

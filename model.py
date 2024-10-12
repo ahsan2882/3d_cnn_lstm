@@ -1,6 +1,6 @@
 from typing import override
 
-from torch import nn, Tensor
+from torch import Tensor, nn
 from torchvision.models.video import R3D_18_Weights, r3d_18  # type: ignore
 
 
@@ -18,6 +18,10 @@ class ResNet3D_LSTM(nn.Module):
         super(ResNet3D_LSTM, self).__init__()
         self.resnet3d = r3d_18(weights=R3D_18_Weights.DEFAULT)
         self.resnet3d.fc = nn.Linear(self.resnet3d.fc.in_features, 512)
+        for param in self.resnet3d.parameters():
+            param.requires_grad = False
+        for param in self.resnet3d.fc.parameters():
+            param.requires_grad = True
         self.lstm = nn.LSTM(input_size=512, hidden_size=lstm_hidden_size,
                             num_layers=num_layers, batch_first=True)
         self.fc = nn.Linear(lstm_hidden_size, num_classes)
@@ -33,16 +37,18 @@ class ResNet3D_LSTM(nn.Module):
         Returns:
             torch.Tensor: Output predictions for each class.
         """
-        batch_size, seq_length, c, d, h, w = x.size()
+        print(f'x size: {x.size()}')
+        print(f"Input shape: {x.shape}")
+        batch_size, d, c, h, w = x.size()
 
         # Reshape input for ResNet3D
-        x = x.view(batch_size * seq_length, c, d, h, w)
+        x = x.view(-1, c, d, h, w)
 
         # Feature extraction via ResNet3D
         x = self.resnet3d(x)
 
         # Reshape features for LSTM input
-        x = x.view(batch_size, seq_length, -1)
+        x = x.view(batch_size, -1, 512)
 
         # LSTM forward pass
         lstm_out, _ = self.lstm(x)

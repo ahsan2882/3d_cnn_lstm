@@ -8,6 +8,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms  # type: ignore
 from tqdm import tqdm
+from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, PackedSequence
 
 
 class VideoTransform:
@@ -109,9 +110,28 @@ def create_dataloaders(video_dir: str | Path,
 
     # Create dataloaders
     train_dataloader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
+        train_dataset, batch_size=batch_size, shuffle=True, num_workers=4, collate_fn=custom_collate_fn)
     validate_dataloader = DataLoader(
-        validate_dataset, batch_size=batch_size, shuffle=False, num_workers=2)
+        validate_dataset, batch_size=batch_size, shuffle=False, num_workers=2, collate_fn=custom_collate_fn)
     test_dataloader = DataLoader(
-        test_dataset, batch_size=batch_size, shuffle=False, num_workers=1)
+        test_dataset, batch_size=batch_size, shuffle=False, num_workers=1, collate_fn=custom_collate_fn)
     return train_dataset, train_dataloader, validate_dataset, validate_dataloader, test_dataset, test_dataloader, train_dataset.classes
+
+
+def custom_collate_fn(batch: List[Tuple[torch.Tensor, int]]) -> Tuple[PackedSequence, torch.Tensor]:
+    videos, labels = zip(*batch)  # Unzip the batch
+
+    # Get lengths of each video
+    lengths = torch.tensor([video.size(1) for video in videos],
+                           dtype=torch.int64)  # Convert to tensor
+
+    # Pad the video sequences (assuming they're all 5D tensors: (C, D, H, W))
+    # Shape (batch_size, max_length, channels, depth, height, width)
+    padded_videos = pad_sequence(
+        [video.permute(1, 0, 2, 3) for video in videos], batch_first=True)
+
+    # Pack the padded sequences
+    packed_videos = pack_padded_sequence(
+        padded_videos, lengths, batch_first=True, enforce_sorted=False)
+
+    return packed_videos, torch.tensor(labels)
